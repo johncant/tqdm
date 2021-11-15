@@ -27,6 +27,62 @@ __author__ = {"github.com/": ["richardsheridan", "casperdcl"]}
 __all__ = ['tqdm_tk', 'ttkrange', 'tqdm', 'trange']
 
 
+def _tk_dispatching_helper():
+    """determine if Tkinter mainloop is dispatching events"""
+    codes = {tkinter.mainloop.__code__, tkinter.Misc.mainloop.__code__}
+    for frame in sys._current_frames().values():
+        while frame:
+            if frame.f_code in codes:
+                return True
+            frame = frame.f_back
+    return False
+
+
+class TqdmWidget(ttk.Frame):
+    def __init__(self, parent, tqdm, cancel_callback=None):
+        super().__init__(parent, padding=5)
+        self._tqdm = tqdm
+
+        self._tk_n_var = tkinter.DoubleVar(self, value=0)
+        self._tk_text_var = tkinter.StringVar(self)
+
+        _tk_label = ttk.Label(self, textvariable=self._tk_text_var,
+                              wraplength=600, anchor="center", justify="center")
+        _tk_label.pack()
+
+        self._tk_pbar = ttk.Progressbar(
+            self, variable=self._tk_n_var, length=450)
+
+        if self._tqdm.total is not None:
+            self._tk_pbar.configure(maximum=self._tqdm.total)
+        else:
+            self._tk_pbar.configure(mode="indeterminate")
+
+        self._tk_pbar.pack()
+
+        if cancel_callback is not None:
+            _tk_button = ttk.Button(self, text="Cancel", command=cancel_callback)
+            _tk_button.pack()
+
+    def display(self, *_, **__):
+        self._tk_n_var.set(self._tqdm.n)
+        d = self._tqdm.format_dict
+        # remove {bar}
+        d['bar_format'] = (d['bar_format'] or "{l_bar}<bar/>{r_bar}").replace(
+            "{bar}", "<bar/>")
+        msg = self._tqdm.format_meter(**d)
+        if '<bar/>' in msg:
+            msg = "".join(re.split(r'\|?<bar/>\|?', msg, 1))
+        self._tk_text_var.set(msg)
+
+    def reset(self, total=None):
+        if hasattr(self, '_tk_pbar'):
+            if total is None:
+                self._tk_pbar.configure(maximum=100, mode="indeterminate")
+            else:
+                self._tk_pbar.configure(maximum=total, mode="determinate")
+
+
 class tqdm_tk(std_tqdm):  # pragma: no cover
     """
     Experimental Tkinter GUI version of tqdm!
@@ -80,29 +136,23 @@ class tqdm_tk(std_tqdm):  # pragma: no cover
             self._tk_window = tkinter.Toplevel(tk_parent)
 
         warn("GUI is experimental/alpha", TqdmExperimentalWarning, stacklevel=2)
-        self._tk_dispatching = self._tk_dispatching_helper()
+        self._tk_dispatching = _tk_dispatching_helper()
+
+        def _wrap_cancel_callback():
+            if self._cancel_callback is None:
+                return None
+            else:
+                return self.cancel
+
+        self.pbar_frame = TqdmWidget(self._tk_window, self, _wrap_cancel_callback())
 
         self._tk_window.protocol("WM_DELETE_WINDOW", self.cancel)
         self._tk_window.wm_title(self.desc)
         self._tk_window.wm_attributes("-topmost", 1)
         self._tk_window.after(0, lambda: self._tk_window.wm_attributes("-topmost", 0))
-        self._tk_n_var = tkinter.DoubleVar(self._tk_window, value=0)
-        self._tk_text_var = tkinter.StringVar(self._tk_window)
-        pbar_frame = ttk.Frame(self._tk_window, padding=5)
-        pbar_frame.pack()
-        _tk_label = ttk.Label(pbar_frame, textvariable=self._tk_text_var,
-                              wraplength=600, anchor="center", justify="center")
-        _tk_label.pack()
-        self._tk_pbar = ttk.Progressbar(
-            pbar_frame, variable=self._tk_n_var, length=450)
-        if self.total is not None:
-            self._tk_pbar.configure(maximum=self.total)
-        else:
-            self._tk_pbar.configure(mode="indeterminate")
-        self._tk_pbar.pack()
-        if self._cancel_callback is not None:
-            _tk_button = ttk.Button(pbar_frame, text="Cancel", command=self.cancel)
-            _tk_button.pack()
+
+        self.pbar_frame.pack()
+
         if grab:
             self._tk_window.grab_set()
 
@@ -126,25 +176,27 @@ class tqdm_tk(std_tqdm):  # pragma: no cover
         # totally unresponsive unless the user manually dispatches
         if not self.leave:
             _close()
+
         elif not self._tk_dispatching:
             if self._warn_leave:
                 warn("leave flag ignored if not in tkinter mainloop",
                      TqdmWarning, stacklevel=2)
             _close()
 
+    def cancel(self):
+        """
+        `cancel_callback()` followed by `close()`
+        when close/cancel buttons clicked.
+        """
+        if self._cancel_callback is not None:
+            self._cancel_callback()
+        self.close()
+
     def clear(self, *_, **__):
         pass
 
     def display(self, *_, **__):
-        self._tk_n_var.set(self.n)
-        d = self.format_dict
-        # remove {bar}
-        d['bar_format'] = (d['bar_format'] or "{l_bar}<bar/>{r_bar}").replace(
-            "{bar}", "<bar/>")
-        msg = self.format_meter(**d)
-        if '<bar/>' in msg:
-            msg = "".join(re.split(r'\|?<bar/>\|?', msg, 1))
-        self._tk_text_var.set(msg)
+        self.pbar_frame.display()
         if not self._tk_dispatching:
             self._tk_window.update()
 
@@ -158,15 +210,6 @@ class tqdm_tk(std_tqdm):  # pragma: no cover
             if refresh and not self._tk_dispatching:
                 self._tk_window.update()
 
-    def cancel(self):
-        """
-        `cancel_callback()` followed by `close()`
-        when close/cancel buttons clicked.
-        """
-        if self._cancel_callback is not None:
-            self._cancel_callback()
-        self.close()
-
     def reset(self, total=None):
         """
         Resets to 0 iterations for repeated use.
@@ -175,23 +218,8 @@ class tqdm_tk(std_tqdm):  # pragma: no cover
         ----------
         total  : int or float, optional. Total to use for the new bar.
         """
-        if hasattr(self, '_tk_pbar'):
-            if total is None:
-                self._tk_pbar.configure(maximum=100, mode="indeterminate")
-            else:
-                self._tk_pbar.configure(maximum=total, mode="determinate")
+        self.pbar_frame.reset(total=total)
         super(tqdm_tk, self).reset(total=total)
-
-    @staticmethod
-    def _tk_dispatching_helper():
-        """determine if Tkinter mainloop is dispatching events"""
-        codes = {tkinter.mainloop.__code__, tkinter.Misc.mainloop.__code__}
-        for frame in sys._current_frames().values():
-            while frame:
-                if frame.f_code in codes:
-                    return True
-                frame = frame.f_back
-        return False
 
 
 def ttkrange(*args, **kwargs):
