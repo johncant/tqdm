@@ -64,7 +64,7 @@ class TqdmWidget(ttk.Frame):
             _tk_button = ttk.Button(self, text="Cancel", command=cancel_callback)
             _tk_button.pack()
 
-    def display(self, *_, **__):
+    def display(self):
         self._tk_n_var.set(self._tqdm.n)
         d = self._tqdm.format_dict
         # remove {bar}
@@ -81,6 +81,42 @@ class TqdmWidget(ttk.Frame):
                 self._tk_pbar.configure(maximum=100, mode="indeterminate")
             else:
                 self._tk_pbar.configure(maximum=total, mode="determinate")
+
+
+class TqdmWindowMixin:
+    def __init__(self, tqdm, parent=None, cancel_callback=None, grab=False, desc=None):
+        super().__init__(parent)
+        self._tqdm = tqdm
+        self.pbar_frame = TqdmWidget(self, tqdm, cancel_callback)
+
+        self.protocol("WM_DELETE_WINDOW", cancel_callback)
+        self.wm_title(desc)
+        self.wm_attributes("-topmost", 1)
+        self.after(0, lambda: self.wm_attributes("-topmost", 0))
+
+        self.pbar_frame.pack()
+
+        if grab:
+            self.grab_set()
+
+    def close(self):
+        self.after('idle', self.destroy)
+        if not self._tqdm._tk_dispatching:
+            self.update()
+
+    def display(self):
+        self.pbar_frame.display()
+
+    def reset(self, *args, **kwargs):
+        self.pbar_frame.reset(*args, **kwargs)
+
+
+class TqdmTk(TqdmWindowMixin, tkinter.Tk):
+    pass
+
+
+class TqdmToplevel(TqdmWindowMixin, tkinter.Toplevel):
+    pass
 
 
 class tqdm_tk(std_tqdm):  # pragma: no cover
@@ -129,11 +165,11 @@ class tqdm_tk(std_tqdm):  # pragma: no cover
                 raise AttributeError(
                     "`tk_parent` required when using `tkinter.NoDefaultRoot()`")
             if tk_parent is None:  # use new default root window as display
-                self._tk_window = tkinter.Tk()
+                self._tk_window = TqdmTk(self, grab=grab, cancel_callback=self.cancel)
             else:  # some other windows already exist
-                self._tk_window = tkinter.Toplevel()
+                self._tk_window = TqdmToplevel(self, grab=grab, cancel_callback=self.cancel)
         else:
-            self._tk_window = tkinter.Toplevel(tk_parent)
+            self._tk_window = TqdmToplevel(self, tk_parent, grab=grab, cancel_callback=self.cancel)
 
         warn("GUI is experimental/alpha", TqdmExperimentalWarning, stacklevel=2)
         self._tk_dispatching = _tk_dispatching_helper()
@@ -144,17 +180,6 @@ class tqdm_tk(std_tqdm):  # pragma: no cover
             else:
                 return self.cancel
 
-        self.pbar_frame = TqdmWidget(self._tk_window, self, _wrap_cancel_callback())
-
-        self._tk_window.protocol("WM_DELETE_WINDOW", self.cancel)
-        self._tk_window.wm_title(self.desc)
-        self._tk_window.wm_attributes("-topmost", 1)
-        self._tk_window.after(0, lambda: self._tk_window.wm_attributes("-topmost", 0))
-
-        self.pbar_frame.pack()
-
-        if grab:
-            self._tk_window.grab_set()
 
     def close(self):
         if self.disable:
@@ -165,23 +190,18 @@ class tqdm_tk(std_tqdm):  # pragma: no cover
         with self.get_lock():
             self._instances.remove(self)
 
-        def _close():
-            self._tk_window.after('idle', self._tk_window.destroy)
-            if not self._tk_dispatching:
-                self._tk_window.update()
-
-        self._tk_window.protocol("WM_DELETE_WINDOW", _close)
+        self._tk_window.protocol("WM_DELETE_WINDOW", self._tk_window.close)
 
         # if leave is set but we are self-dispatching, the left window is
         # totally unresponsive unless the user manually dispatches
         if not self.leave:
-            _close()
+            self._tk_window.close()
 
         elif not self._tk_dispatching:
             if self._warn_leave:
                 warn("leave flag ignored if not in tkinter mainloop",
                      TqdmWarning, stacklevel=2)
-            _close()
+            self._tk_window.close()
 
     def cancel(self):
         """
@@ -196,7 +216,7 @@ class tqdm_tk(std_tqdm):  # pragma: no cover
         pass
 
     def display(self, *_, **__):
-        self.pbar_frame.display()
+        self._tk_window.display()
         if not self._tk_dispatching:
             self._tk_window.update()
 
@@ -218,7 +238,7 @@ class tqdm_tk(std_tqdm):  # pragma: no cover
         ----------
         total  : int or float, optional. Total to use for the new bar.
         """
-        self.pbar_frame.reset(total=total)
+        self._tk_window.reset(total=total)
         super(tqdm_tk, self).reset(total=total)
 
 
